@@ -126,6 +126,8 @@ type model struct {
 	searchQuery   string // last applied query
 	searchMatches []int  // line indices matching current query
 	searchIdx     int    // position within searchMatches
+
+	lineNoW int // digit width of widest line number in the diff
 }
 
 // Run launches the TUI and returns the comments left by the reviewer.
@@ -160,10 +162,11 @@ func newModel(files []diff.FileDiff) model {
 	si.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3"))
 	si.Prompt = "/"
 
-	lines, fileStarts := buildLines(files)
+	lines, fileStarts, lineNoW := buildLines(files)
 	return model{
 		lines:       lines,
 		fileStarts:  fileStarts,
+		lineNoW:     lineNoW,
 		ta:          ta,
 		editingIdx:  -1,
 		fuzzyInput:  fi,
@@ -188,6 +191,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.vp.Width = m.width
 			m.vp.Height = m.vpHeight()
+			m.vp.SetContent(m.renderContent())
+			m.scrollToCursor()
 		}
 		return m, nil
 
@@ -239,7 +244,7 @@ func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.clampCursor()
 		m.vp.SetContent(m.renderContent())
-		m.vp.SetYOffset(m.cursor)
+		m.vp.SetYOffset(m.visualOffset(m.cursor))
 		return m, nil
 	case "[", "{":
 		for i := m.cursor - 1; i >= 0; i-- {
@@ -250,7 +255,7 @@ func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.clampCursor()
 		m.vp.SetContent(m.renderContent())
-		m.vp.SetYOffset(m.cursor)
+		m.vp.SetYOffset(m.visualOffset(m.cursor))
 		return m, nil
 
 	case "f":
@@ -513,14 +518,81 @@ func (m *model) clampCursor() {
 	}
 }
 
+// gutterW returns the visible width of the line-number gutter.
+// Format: "NNNNN NNNNN +/- " where N columns = m.lineNoW each.
+func (m model) gutterW() int { return m.lineNoW*2 + 4 }
+
+// wrapRows splits a pre-rendered ANSI diff line into visual rows when it
+// exceeds availW visible columns. Returns nil if no wrapping is needed.
+// Continuation rows get a blank gutter of the same width.
+func (m model) wrapRows(base string, availW int) []string {
+	gw := m.gutterW()
+	rowW := availW - gw
+	if rowW <= 0 {
+		return nil
+	}
+	visContent := lipgloss.Width(base) - gw
+	if visContent <= rowW {
+		return nil
+	}
+	gutterAnsi := ansi.Cut(base, 0, gw)
+	blank := strings.Repeat(" ", gw)
+	rows := make([]string, 0, visContent/rowW+1)
+	for off := 0; off < visContent; off += rowW {
+		end := min(off+rowW, visContent)
+		chunk := ansi.Cut(base, gw+off, gw+end)
+		padded := chunk + strings.Repeat(" ", max(0, rowW-lipgloss.Width(chunk)))
+		if off == 0 {
+			rows = append(rows, gutterAnsi+padded)
+		} else {
+			rows = append(rows, blank+padded)
+		}
+	}
+	return rows
+}
+
+// visualOffset returns the viewport line index for logical line at idx,
+// accounting for wrapped lines above it.
+func (m model) visualOffset(idx int) int {
+	availW := m.width - 2
+	off := 0
+	for i := 0; i < idx && i < len(m.lines); i++ {
+		ln := m.lines[i]
+		switch ln.kind {
+		case kindAdd, kindRemove, kindContext:
+			rows := m.wrapRows(ln.base, availW)
+			if rows != nil {
+				off += len(rows)
+				continue
+			}
+		}
+		off++
+	}
+	return off
+}
+
 func (m *model) scrollToCursor() {
 	if m.vp.Height < 1 {
 		return
 	}
-	if m.cursor < m.vp.YOffset {
-		m.vp.SetYOffset(m.cursor)
-	} else if m.cursor > m.vp.YOffset+m.vp.Height-1 {
-		m.vp.SetYOffset(m.cursor - m.vp.Height + 1)
+	visStart := m.visualOffset(m.cursor)
+	var visH int
+	if m.cursor >= 0 && m.cursor < len(m.lines) {
+		ln := m.lines[m.cursor]
+		switch ln.kind {
+		case kindAdd, kindRemove, kindContext:
+			if rows := m.wrapRows(ln.base, m.width-2); rows != nil {
+				visH = len(rows)
+			}
+		}
+	}
+	if visH == 0 {
+		visH = 1
+	}
+	if visStart < m.vp.YOffset {
+		m.vp.SetYOffset(visStart)
+	} else if visStart+visH-1 > m.vp.YOffset+m.vp.Height-1 {
+		m.vp.SetYOffset(visStart + visH - m.vp.Height)
 	}
 }
 
@@ -534,7 +606,11 @@ func (m model) vpHeight() int {
 	default:
 		panel = 1 // status bar or search bar, same height
 	}
-	h := m.height - 1 - panel
+	headerH := 1
+	if m.renderHeader() == "" {
+		headerH = 0
+	}
+	h := m.height - headerH - panel
 	if h < 1 {
 		h = 1
 	}
@@ -546,7 +622,11 @@ func (m model) View() string {
 		return "loading…\n"
 	}
 
-	parts := []string{m.renderHeader(), m.vp.View()}
+	var parts []string
+	if h := m.renderHeader(); h != "" {
+		parts = append(parts, h)
+	}
+	parts = append(parts, m.vp.View())
 
 	switch m.mode {
 	case modeComment:
@@ -619,7 +699,7 @@ func (m model) renderHeader() string {
 
 	gap := m.width - lipgloss.Width(title) - lipgloss.Width(keys)
 	if gap < 0 {
-		gap = 0
+		return ""
 	}
 	return sHeader.Width(m.width).Render(title + strings.Repeat(" ", gap) + keys)
 }
@@ -672,7 +752,7 @@ func (m model) renderStatus() string {
 			sKey.Render("[") + sStatus.Render(" prev file")
 	}
 
-	maxLeftW := m.width - rightW
+	maxLeftW := m.width - rightW - 1 // reserve at least 1 space before the right side
 	if lipgloss.Width(left) > maxLeftW {
 		left = ansi.Truncate(left, max(0, maxLeftW), "")
 	}
@@ -711,13 +791,16 @@ func (m model) renderContent() string {
 	for i, ln := range m.lines {
 		s := ln.base
 
+		availW := m.width - 2
+
 		switch ln.kind {
 		case kindAdd, kindRemove:
 			bg := addBg
 			if ln.kind == kindRemove {
 				bg = delBg
 			}
-			if i == m.cursor {
+			isCursor := i == m.cursor
+			if isCursor {
 				bg = addBgCursor
 				if ln.kind == kindRemove {
 					bg = delBgCursor
@@ -725,33 +808,82 @@ func (m model) renderContent() string {
 				if matchSet[i] {
 					s = injectMatchHighlight(ln, m.searchQuery)
 				}
-				sb.WriteString(sCursorBar.Render("▌"))
-			} else if matchSet[i] {
-				sb.WriteString(sMatchBar.Render("▌"))
-			} else {
-				sb.WriteByte(' ')
 			}
-			// Pad to full width then apply persistent background.
-			// Gutter takes 1 column, so content gets m.width-2.
-			// The explicit reset prevents the background bleeding into the
-			// first cell of the next line when the terminal processes \n.
-			sb.WriteString(withBg(padLine(s, m.width-2), bg))
-			sb.WriteString("\x1b[0m")
+			rows := m.wrapRows(s, availW)
+			if rows == nil {
+				rows = []string{padLine(s, availW)}
+			}
+			for ri, row := range rows {
+				if ri > 0 {
+					sb.WriteString("\x1b[0m\n")
+					if isCursor {
+						sb.WriteString(sCursorBar.Render("▌"))
+					} else {
+						sb.WriteByte(' ')
+					}
+				} else {
+					if isCursor {
+						sb.WriteString(sCursorBar.Render("▌"))
+					} else if matchSet[i] {
+						sb.WriteString(sMatchBar.Render("▌"))
+					} else {
+						sb.WriteByte(' ')
+					}
+				}
+				sb.WriteString(withBg(row, bg))
+				sb.WriteString("\x1b[0m")
+			}
 
 		default:
-			if i == m.cursor {
-				if matchSet[i] {
-					s = injectMatchHighlight(ln, m.searchQuery)
-				}
-				s = padLine(s, m.width-2)
-				sb.WriteString(sCursorBar.Render("▌"))
-				sb.WriteString(sCursor.Render(s))
-			} else if matchSet[i] {
-				sb.WriteString(sMatchBar.Render("▌"))
-				sb.WriteString(s)
+			isCursor := i == m.cursor
+			if isCursor && matchSet[i] {
+				s = injectMatchHighlight(ln, m.searchQuery)
+			}
+			// Only context lines wrap; headers/hunks/comments truncate.
+			var rows []string
+			if ln.kind == kindContext {
+				rows = m.wrapRows(s, availW)
 			} else {
-				sb.WriteByte(' ')
-				sb.WriteString(s)
+				s = padLine(s, availW)
+			}
+			if isCursor {
+				if rows == nil {
+					rows = []string{padLine(s, availW)}
+				}
+				for ri, row := range rows {
+					if ri > 0 {
+						sb.WriteByte('\n')
+					}
+					sb.WriteString(sCursorBar.Render("▌"))
+					sb.WriteString(sCursor.Render(row))
+				}
+			} else if matchSet[i] {
+				if rows == nil {
+					sb.WriteString(sMatchBar.Render("▌"))
+					sb.WriteString(s)
+				} else {
+					for ri, row := range rows {
+						if ri > 0 {
+							sb.WriteString("\n ")
+						} else {
+							sb.WriteString(sMatchBar.Render("▌"))
+						}
+						sb.WriteString(row)
+					}
+				}
+			} else {
+				if rows == nil {
+					sb.WriteByte(' ')
+					sb.WriteString(s)
+				} else {
+					for ri, row := range rows {
+						if ri > 0 {
+							sb.WriteByte('\n')
+						}
+						sb.WriteByte(' ')
+						sb.WriteString(row)
+					}
+				}
 			}
 		}
 		sb.WriteByte('\n')
@@ -759,9 +891,23 @@ func (m model) renderContent() string {
 	return sb.String()
 }
 
-const lineNoWidth = 5
+func buildLines(files []diff.FileDiff) ([]uiLine, []fileEntry, int) {
+	// Compute the minimum column width needed to display any line number.
+	maxNo := 1
+	for _, f := range files {
+		for _, h := range f.Hunks {
+			for _, dl := range h.Lines {
+				if dl.OldNo > maxNo {
+					maxNo = dl.OldNo
+				}
+				if dl.NewNo > maxNo {
+					maxNo = dl.NewNo
+				}
+			}
+		}
+	}
+	lineNoW := len(fmt.Sprintf("%d", maxNo))
 
-func buildLines(files []diff.FileDiff) ([]uiLine, []fileEntry) {
 	var lines []uiLine
 	var fileStarts []fileEntry
 
@@ -831,36 +977,36 @@ func buildLines(files []diff.FileDiff) ([]uiLine, []fileEntry) {
 			for _, dl := range h.Lines {
 				expanded := dl
 				expanded.Content = contents[idx]
-				l := buildDiffLine(expanded, path, highlighted[idx])
+				l := buildDiffLine(expanded, path, highlighted[idx], lineNoW)
 				idx++
 				l.commentIdx = -1
 				lines = append(lines, l)
 			}
 		}
 	}
-	return lines, fileStarts
+	return lines, fileStarts, lineNoW
 }
 
-func buildDiffLine(dl diff.DiffLine, file, content string) uiLine {
-	old := sLineNo.Render(fmtNo(dl.OldNo))
-	neu := sLineNo.Render(fmtNo(dl.NewNo))
+func buildDiffLine(dl diff.DiffLine, file, content string, w int) uiLine {
+	old := sLineNo.Render(fmtNo(dl.OldNo, w))
+	neu := sLineNo.Render(fmtNo(dl.NewNo, w))
 
 	switch dl.Type {
 	case "add":
-		gutter := sAdd.Render(neu) + sLineNo.Render(" "+fmtNo(0)) + sAdd.Render(" + ")
+		gutter := sAdd.Render(neu) + sLineNo.Render(" "+fmtNo(0, w)) + sAdd.Render(" + ")
 		return uiLine{
 			kind:   kindAdd,
-			gutter: fmtNo(dl.NewNo) + " " + fmtNo(0) + " + ",
+			gutter: fmtNo(dl.NewNo, w) + " " + fmtNo(0, w) + " + ",
 			base:   gutter + content,
 			text:   dl.Content,
 			file:   file,
 			newNo:  dl.NewNo,
 		}
 	case "remove":
-		gutter := sLineNo.Render(fmtNo(0)) + sDel.Render(" "+old) + sDel.Render(" - ")
+		gutter := sLineNo.Render(fmtNo(0, w)) + sDel.Render(" "+old) + sDel.Render(" - ")
 		return uiLine{
 			kind:   kindRemove,
-			gutter: fmtNo(0) + " " + fmtNo(dl.OldNo) + " - ",
+			gutter: fmtNo(0, w) + " " + fmtNo(dl.OldNo, w) + " - ",
 			base:   gutter + content,
 			text:   dl.Content,
 			file:   file,
@@ -940,15 +1086,15 @@ func renderCommentDisplay(c diff.Comment) string {
 	return loc + body
 }
 
-func fmtNo(n int) string {
+func fmtNo(n, w int) string {
 	if n == 0 {
-		return strings.Repeat(" ", lineNoWidth)
+		return strings.Repeat(" ", w)
 	}
 	s := fmt.Sprintf("%d", n)
-	if len(s) >= lineNoWidth {
+	if len(s) >= w {
 		return s
 	}
-	return strings.Repeat(" ", lineNoWidth-len(s)) + s
+	return strings.Repeat(" ", w-len(s)) + s
 }
 
 // injectMatchHighlight rebuilds a line with the first occurrence of query
