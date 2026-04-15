@@ -33,6 +33,9 @@ git diff main..HEAD | flak
 
 # Works with jj too
 jj diff -r @ --git | flak
+
+# Review against a branch
+jj diff --from main --git | flak
 ```
 
 When done, comments are printed to stdout:
