@@ -80,9 +80,11 @@ If you leave no comments: `=== flak review: LGTM (no comments) ===`
    jj describe -m "chore: release vX.Y.Z"
    jj tag set vX.Y.Z
    ```
-2. Push commits and tags:
+2. Push the bookmark and the tag (jj does not push tags via `git push`):
    ```sh
+   jj bookmark set main -r vX.Y.Z
    jj git push --all
+   git push origin vX.Y.Z
    ```
 
 `go install github.com/notfilippo/flak@latest` picks up the new version automatically.
