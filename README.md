@@ -59,7 +59,8 @@ If you leave no comments: `=== flak review: LGTM (no comments) ===`
 | Key                    | Action                                           |
 | ---------------------- | ------------------------------------------------ |
 | `j` / `k` or `↑` / `↓` | Scroll line by line                              |
-| `ctrl+d` / `ctrl+u`    | Scroll half page                                 |
+| `ctrl+d` / `ctrl+u`    | Scroll half page down / up                       |
+| `ctrl+f` / `ctrl+b`    | Scroll full page down / up                       |
 | `g` / `G`              | Jump to top / bottom                             |
 | `]` / `[`              | Next / previous file                             |
 | `f`                    | Fuzzy file picker                                |
@@ -67,6 +68,21 @@ If you leave no comments: `=== flak review: LGTM (no comments) ===`
 | `n` / `N`              | Next / previous search match                     |
 | `c`                    | Add inline comment on current line               |
 | `e`                    | Edit comment under cursor                        |
-| `x`                    | Delete comment under cursor                      |
+| `d` or `x`             | Delete comment under cursor                      |
 | `o`                    | Open current file in `$EDITOR`                   |
 | `q`                    | Quit and print comments                          |
+| `?`                    | Show keybinding help                             |
+
+## Releasing
+
+1. Describe and tag the new version:
+   ```sh
+   jj describe -m "chore: release vX.Y.Z"
+   jj tag set vX.Y.Z
+   ```
+2. Push commits and tags:
+   ```sh
+   jj git push --all
+   ```
+
+`go install github.com/notfilippo/flak@latest` picks up the new version automatically.

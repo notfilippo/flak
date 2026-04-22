@@ -101,7 +101,29 @@ const (
 	modeEdit             // editing an existing comment
 	modeFuzzy            // fuzzy file picker
 	modeSearch           // incremental line search
+	modeHelp             // keybinding reference panel
 )
+
+type helpEntry struct {
+	key    string
+	action string
+}
+
+var helpEntries = []helpEntry{
+	{"j / k  ↑ / ↓", "scroll line by line"},
+	{"ctrl+d / ctrl+u", "scroll half page down / up"},
+	{"ctrl+f / ctrl+b", "scroll full page down / up"},
+	{"g / G", "jump to top / bottom"},
+	{"] / [", "next / previous file"},
+	{"f", "fuzzy file picker"},
+	{"/", "search"},
+	{"n / N", "next / previous search match"},
+	{"c", "add inline comment on current line"},
+	{"e or enter", "edit comment under cursor"},
+	{"d or x", "delete comment under cursor"},
+	{"o", "open current file in $EDITOR"},
+	{"q", "quit and print comments"},
+}
 
 type model struct {
 	width, height int
@@ -121,6 +143,7 @@ type model struct {
 	fuzzyInput    textinput.Model
 	fuzzyMatches  []int // indices into fileStarts
 	fuzzySelected int
+	fuzzyOffset   int // first visible row in the fuzzy list
 
 	searchInput   textinput.Model
 	searchQuery   string // last applied query
@@ -204,6 +227,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateFuzzy(msg)
 		case modeSearch:
 			return m.updateSearch(msg)
+		case modeHelp:
+			return m.updateHelp(msg)
 		default:
 			return m.updateView(msg)
 		}
@@ -226,10 +251,14 @@ func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor--
 	case "down", "j":
 		m.cursor++
-	case "pgup", "ctrl+b", "ctrl+u":
+	case "ctrl+u":
 		m.cursor -= m.vp.Height / 2
-	case "pgdown", "ctrl+f", "ctrl+d":
+	case "ctrl+d":
 		m.cursor += m.vp.Height / 2
+	case "pgup", "ctrl+b":
+		m.cursor -= m.vp.Height
+	case "pgdown", "ctrl+f":
+		m.cursor += m.vp.Height
 	case "g", "home":
 		m.cursor = 0
 	case "G", "end":
@@ -264,6 +293,7 @@ func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.fuzzyInput.Reset()
 		m.fuzzyMatches = allFileIndices(len(m.fileStarts))
 		m.fuzzySelected = 0
+		m.fuzzyOffset = 0
 		return m, m.fuzzyInput.Focus()
 
 	case "/":
@@ -337,7 +367,7 @@ func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "x":
+	case "x", "d":
 		cur := m.lines[m.cursor]
 		if cur.kind == kindComment {
 			m = m.deleteComment(cur.commentIdx)
@@ -345,6 +375,11 @@ func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollToCursor()
 			return m, nil
 		}
+		return m, nil
+
+	case "?":
+		m.mode = modeHelp
+		m.vp.Height = m.vpHeight()
 		return m, nil
 	}
 
@@ -405,18 +440,24 @@ func (m model) updateFuzzy(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.vp.Height = m.vpHeight()
 		m.fuzzyInput.Blur()
 		m.vp.SetContent(m.renderContent())
-		m.vp.SetYOffset(m.cursor)
+		m.vp.SetYOffset(m.visualOffset(m.cursor))
 		return m, nil
 
 	case "up", "ctrl+p":
 		if m.fuzzySelected > 0 {
 			m.fuzzySelected--
+			if m.fuzzySelected < m.fuzzyOffset {
+				m.fuzzyOffset = m.fuzzySelected
+			}
 		}
 		return m, nil
 
 	case "down", "ctrl+n":
 		if m.fuzzySelected < len(m.fuzzyMatches)-1 {
 			m.fuzzySelected++
+			if m.fuzzySelected >= m.fuzzyOffset+fuzzyMaxRows {
+				m.fuzzyOffset = m.fuzzySelected - fuzzyMaxRows + 1
+			}
 		}
 		return m, nil
 	}
@@ -426,6 +467,13 @@ func (m model) updateFuzzy(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.fuzzyMatches = fuzzyFilter(m.fileStarts, m.fuzzyInput.Value())
 	if m.fuzzySelected >= len(m.fuzzyMatches) {
 		m.fuzzySelected = max(0, len(m.fuzzyMatches)-1)
+	}
+	maxOffset := max(0, len(m.fuzzyMatches)-fuzzyMaxRows)
+	if m.fuzzyOffset > maxOffset {
+		m.fuzzyOffset = maxOffset
+	}
+	if m.fuzzyOffset > m.fuzzySelected {
+		m.fuzzyOffset = m.fuzzySelected
 	}
 	return m, cmd
 }
@@ -458,6 +506,15 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.searchInput, cmd = m.searchInput.Update(msg)
 	return m, cmd
+}
+
+func (m model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "?", "q", "ctrl+c":
+		m.mode = modeView
+		m.vp.Height = m.vpHeight()
+	}
+	return m, nil
 }
 
 func (m model) applyNewComment(body string) model {
@@ -603,6 +660,8 @@ func (m model) vpHeight() int {
 		panel = 1 + (taHeight + 2) + 1
 	case modeFuzzy:
 		panel = 3 + 1 + fuzzyMaxRows + 1 + 1
+	case modeHelp:
+		panel = 1 + 1 + len(helpEntries) + 1 + 1
 	default:
 		panel = 1 // status bar or search bar, same height
 	}
@@ -651,6 +710,9 @@ func (m model) View() string {
 	case modeFuzzy:
 		parts = append(parts, m.renderFuzzyPanel())
 
+	case modeHelp:
+		parts = append(parts, m.renderHelpPanel())
+
 	default:
 		parts = append(parts, m.renderStatus())
 	}
@@ -665,23 +727,43 @@ func (m model) renderFuzzyPanel() string {
 	if len(m.fuzzyMatches) == 0 {
 		listLines[0] = sFuzzyNormal.Render("  no matches")
 	} else {
-		for i := 0; i < min(len(m.fuzzyMatches), fuzzyMaxRows); i++ {
-			fe := m.fileStarts[m.fuzzyMatches[i]]
+		for slot := 0; slot < fuzzyMaxRows; slot++ {
+			pos := m.fuzzyOffset + slot
+			if pos >= len(m.fuzzyMatches) {
+				break
+			}
+			fe := m.fileStarts[m.fuzzyMatches[pos]]
 			label := fmt.Sprintf("  %-50s %s %s",
 				fe.path,
 				sAdd.Render(fmt.Sprintf("+%d", fe.adds)),
 				sDel.Render(fmt.Sprintf("-%d", fe.dels)),
 			)
-			if i == m.fuzzySelected {
-				listLines[i] = sFuzzySelected.Width(m.width - 2).Render("▶ " + strings.TrimPrefix(label, "  "))
+			if pos == m.fuzzySelected {
+				listLines[slot] = sFuzzySelected.Width(m.width - 2).Render("▶ " + strings.TrimPrefix(label, "  "))
 			} else {
-				listLines[i] = sFuzzyNormal.Render(label)
+				listLines[slot] = sFuzzyNormal.Render(label)
 			}
 		}
 	}
 	sep := sFuzzySep.Render(strings.Repeat("─", m.width))
 	hint := sStatus.Width(m.width).Render("  ↑↓/ctrl+p/n navigate · enter jump · esc close")
 	return strings.Join(append([]string{inputBox, sep}, append(listLines, sep, hint)...), "\n")
+}
+
+func (m model) renderHelpPanel() string {
+	title := " keybindings "
+	titleLine := sHeaderTitle.Render(title) + sFuzzySep.Render(strings.Repeat("─", max(0, m.width-lipgloss.Width(title))))
+	sep := sFuzzySep.Render(strings.Repeat("─", m.width))
+	hint := sStatus.Width(m.width).Render("  esc / ? close")
+
+	rows := make([]string, len(helpEntries))
+	for i, e := range helpEntries {
+		rows[i] = "  " + sKey.Render(e.key) + sStatus.Render("  "+e.action)
+	}
+
+	parts := append([]string{titleLine, sep}, rows...)
+	parts = append(parts, sep, hint)
+	return strings.Join(parts, "\n")
 }
 
 func (m model) renderHeader() string {
@@ -695,7 +777,8 @@ func (m model) renderHeader() string {
 		sKey.Render("/") + sHeader.Render(" search  ") +
 		sKey.Render("c") + sHeader.Render(" comment  ") +
 		sKey.Render("o") + sHeader.Render(" open  ") +
-		sKey.Render("q") + sHeader.Render(" quit  ")
+		sKey.Render("q") + sHeader.Render(" quit  ") +
+		sKey.Render("?") + sHeader.Render(" help  ")
 
 	gap := m.width - lipgloss.Width(title) - lipgloss.Width(keys)
 	if gap < 0 {
@@ -746,7 +829,7 @@ func (m model) renderStatus() string {
 		}
 	case kindComment:
 		left = "  " + sKey.Render("e") + sStatus.Render(" edit  ") +
-			sKey.Render("x") + sStatus.Render(" delete")
+			sKey.Render("d") + sStatus.Render(" delete")
 	case kindFileHeader:
 		left = "  " + sKey.Render("]") + sStatus.Render(" next file  ") +
 			sKey.Render("[") + sStatus.Render(" prev file")
