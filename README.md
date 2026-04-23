@@ -1,6 +1,6 @@
 # flak
 
-![demo](docs/demo.png)
+<img src="demo/demo.png" width="1200" alt="demo">
 
 A fast, local diff review tool for the terminal. Pipe a unified diff in, leave inline comments, get them back on stdout. No IDE, no GitHub round-trips.
 
