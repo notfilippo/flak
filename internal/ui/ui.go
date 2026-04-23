@@ -530,6 +530,12 @@ func (m model) applyNewComment(body string) model {
 	newLines = append(newLines, cl)
 	newLines = append(newLines, m.lines[m.cursor+1:]...)
 	m.lines = newLines
+	insertedAt := m.cursor + 1
+	for i, mi := range m.searchMatches {
+		if mi >= insertedAt {
+			m.searchMatches[i]++
+		}
+	}
 	m.cursor++
 	return m
 }
@@ -549,8 +555,10 @@ func (m model) applyEdit(body string) model {
 
 func (m model) deleteComment(idx int) model {
 	m.comments = append(m.comments[:idx], m.comments[idx+1:]...)
+	deletedAt := -1
 	for i, ln := range m.lines {
 		if ln.kind == kindComment && ln.commentIdx == idx {
+			deletedAt = i
 			m.lines = append(m.lines[:i], m.lines[i+1:]...)
 			if m.cursor >= len(m.lines) {
 				m.cursor = len(m.lines) - 1
@@ -561,6 +569,22 @@ func (m model) deleteComment(idx int) model {
 	for i := range m.lines {
 		if m.lines[i].commentIdx > idx {
 			m.lines[i].commentIdx--
+		}
+	}
+	if deletedAt >= 0 {
+		updated := m.searchMatches[:0]
+		for _, mi := range m.searchMatches {
+			if mi == deletedAt {
+				continue
+			}
+			if mi > deletedAt {
+				mi--
+			}
+			updated = append(updated, mi)
+		}
+		m.searchMatches = updated
+		if m.searchIdx >= len(m.searchMatches) && len(m.searchMatches) > 0 {
+			m.searchIdx = len(m.searchMatches) - 1
 		}
 	}
 	return m
